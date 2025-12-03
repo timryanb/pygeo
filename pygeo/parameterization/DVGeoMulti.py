@@ -5,6 +5,7 @@ from collections import OrderedDict
 from baseclasses.utils import Error
 from mpi4py import MPI
 import numpy as np
+import numpy.typing as npt
 from scipy import sparse
 
 from pygeo.geo_utils import readNValues
@@ -63,6 +64,7 @@ class DVGeometryMulti:
         self.complex = isComplex
         self.curConfig = None
         self.updateICs = True
+        self.JT: dict[str, sparse.csr_array] = {}
 
         # Set real or complex Fortran API
         if isComplex:
@@ -817,7 +819,7 @@ class DVGeometryMulti:
         self.update(ptSetName, config=config)
 
         # Compute the total Jacobian for this point set
-        self._computeTotalJacobian(ptSetName, config)
+        self.computeTotalJacobian(ptSetName, config)
 
         # Make dIdpt at least 3D
         if len(dIdpt.shape) == 2:
@@ -1085,7 +1087,38 @@ class DVGeometryMulti:
 
         return nodes, barsConn
 
-    def _computeTotalJacobian(self, ptSetName, config):
+    def convertSensitivityToDict(
+        self, dIdx: npt.NDArray[np.float64], out1D=False, useCompositeNames=False
+    ) -> dict[str, npt.NDArray[np.float64]]:
+        dvOffset = 0
+        dIdxDict = {}
+        for comp in self.compNames:
+            DVGeo = self.comps[comp].DVGeo
+            nDVComp = DVGeo.getNDV()
+            if nDVComp > 0:
+                dIdxComp = DVGeo.convertSensitivityToDict(
+                    dIdx[:, dvOffset : dvOffset + nDVComp], out1D=out1D, useCompositeNames=useCompositeNames
+                )
+
+                for k, v in dIdxComp.items():
+                    dIdxDict[k] = v
+                dvOffset += nDVComp
+
+        return dIdxDict
+
+    def convertDictToSensitivity(self, dIdxDict: dict[str, npt.NDArray[np.float64]]) -> npt.NDArray[np.float64]:
+        dIdx = np.zeros(self.getNDV(), dtype="d")
+        dvOffset = 0
+        for comp in self.compNames:
+            DVGeo = self.comps[comp].DVGeo
+            nDVComp = DVGeo.getNDV()
+            if nDVComp > 0:
+                dIdxComp = DVGeo.convertDictToSensitivity(dIdxDict)
+                dIdx[dvOffset : dvOffset + nDVComp] = dIdxComp
+                dvOffset += nDVComp
+        return dIdx
+
+    def computeTotalJacobian(self, ptSetName, config):
         """
         This routine computes the total jacobian. It takes the jacobians
         from respective DVGeo objects and also computes the jacobians for
@@ -1127,6 +1160,8 @@ class DVGeometryMulti:
 
         # now we can save this jacobian in the pointset
         ptSet.jac = jac
+        self.JT[ptSetName] = jac.T
+
 
     def _setICSurfaces(self, config):
         # updates the ICs with the given config
